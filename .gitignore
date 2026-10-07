@@ -1,0 +1,9 @@
+# Only these reviewed files belong in this repository for now.
+# Local credentials, GUI work, data, executables, and caches stay ignored.
+*
+!/.gitignore
+!/adapter.py
+!/poller.py
+!/README.md
+!/requirements.txt
+!/LICENSE
