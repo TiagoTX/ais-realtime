@@ -104,10 +104,19 @@ the report timestamp.
 An asset payload contains `asset_name` (currently the MMSI string), `lat`, `lon`,
 and `extra`. The value of `extra` is deliberately the string `"{}"`.
 
-A report containing the `target_id` key is a target, including when its value
-is zero. Its payload also includes the original `target_id` and `asset_id`.
-The latter identifies the vehicle that provided the target report. The mapper
-currently requires an MMSI and an `asset_id` for target rows as well.
+A report containing the `target_name` key is a target. Its payload contains
+the same base fields plus the original `target_name`. In a target report,
+`asset_name` always identifies the reporting asset, while `target_name`
+identifies the target. The current mapper derives `asset_name` from the source
+row's MMSI, so target rows must carry the reporting asset's MMSI as well.
+Neither payload contains `asset_id` or `target_id`.
+
+The planned GUI will associate target reports with their reporting asset by
+`asset_name`. Hiding an asset will hide its position and associated target
+reports. Initially, it will show the latest position per asset and every
+target report within a user-selected time window, without collapsing reports
+by `target_name`. These are display rules; they do not change ingestion or
+remove stored reports.
 
 The adapter writes other reports to `AssetDB` and targets to `TargetDB`, with
 any configured prefix. These are two tables inside the same SIBDB. The source

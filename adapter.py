@@ -112,9 +112,8 @@ def ais_to_dict(row):
         "extra": "{}",
     }
 
-    if "target_id" in row:
-        payload["target_id"] = row["target_id"]
-        payload["asset_id"] = row["asset_id"]
+    if "target_name" in row:
+        payload["target_name"] = row["target_name"]
 
     return received_at.astimezone(timezone.utc).isoformat(), payload
 
@@ -182,7 +181,7 @@ def run_once(time_dict, table_prefix="", dry_run=False):
             counts["rejected"] += 1
             continue
 
-        base_table = "TargetDB" if "target_id" in row else "AssetDB"
+        base_table = "TargetDB" if "target_name" in row else "AssetDB"
         destination_table = table_prefix + base_table
 
         if dry_run:

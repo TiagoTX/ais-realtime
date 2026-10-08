@@ -1,3 +1,5 @@
 psycopg2-binary>=2.9,<3
 python-dotenv>=1,<2
 requests>=2,<3
+streamlit==1.64.0
+folium==0.20.0
