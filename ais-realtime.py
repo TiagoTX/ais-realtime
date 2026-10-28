@@ -231,7 +231,7 @@ def mapit(assets, asset_colors):
 
 def loop():
     settings = winlayout()
-    st.logo("https://www.inesctec.pt/INESCTECcomb_EN_mail.png")
+    st.logo("https://repositorio.inesctec.pt/assets/images/dspace-logo.svg")
 
     if "assets" not in st.session_state or settings["refresh_clicked"]:
         try:
