@@ -8,13 +8,11 @@ from adapter import build_time_window, run_once
 class PollingWorker:
     def __init__(
         self,
-        interval_minutes,
         tolerance_minutes=None,
         table_prefix="",
         dry_run=False,
         heartbeat_timeout_seconds=120,
     ):
-        self.interval_minutes = interval_minutes
         self.tolerance_minutes = tolerance_minutes
         self.table_prefix = table_prefix
         self.dry_run = dry_run
@@ -31,23 +29,26 @@ class PollingWorker:
         self._last_successful_end = None
 
         self._status = {
-            "running": False,
+            "phase": "stopped",
             "counts": None,
             "error": None,
+            "next_run_at": None,
         }
 
-    def start(self):
+    def start(self, interval_minutes):
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 return False
 
             self._stop_event.clear()
             self._last_heartbeat = monotonic()
-            self._status["running"] = True
+            self._status["phase"] = "fetching"
             self._status["error"] = None
+            self._status["next_run_at"] = None
 
             self._thread = Thread(
                 target=self._loop,
+                args=(interval_minutes,),
                 name="AIS polling worker",
                 daemon=True,
             )
@@ -58,8 +59,8 @@ class PollingWorker:
         with self._lock:
             self._stop_event.set()
 
-    def _loop(self):
-        interval_seconds = self.interval_minutes * 60
+    def _loop(self, interval_minutes):
+        interval_seconds = interval_minutes * 60
         retry_start = None
 
         try:
@@ -68,18 +69,22 @@ class PollingWorker:
                     self._stop_event.set()
                     break
 
+                with self._lock:
+                    self._status["phase"] = "fetching"
+                    self._status["next_run_at"] = None
+
                 started = monotonic()
                 window = None
 
                 try:
                     window = build_time_window(
-                        self.interval_minutes,
+                        interval_minutes,
                         self.tolerance_minutes,
                     )
 
                     overlap = (
                         window["fin"] - window["ini"]
-                        - timedelta(minutes=self.interval_minutes)
+                        - timedelta(minutes=interval_minutes)
                     )
 
                     if retry_start is not None:
@@ -93,10 +98,11 @@ class PollingWorker:
                         dry_run=self.dry_run,
                     )
 
-                    self._last_successful_end = window["fin"]
+                    
                     retry_start = None
 
                     with self._lock:
+                        self._last_successful_end = window["fin"]
                         self._status["counts"] = counts
                         self._status["error"] = None
 
@@ -109,17 +115,24 @@ class PollingWorker:
 
                 remaining = interval_seconds - (monotonic() - started)
                 wait_seconds = remaining if remaining > 0 else interval_seconds
+                next_run_at = wait_seconds + monotonic()
 
-                if self._wait_for_next_run(wait_seconds):
+                with self._lock:
+                    self._status["phase"] = "waiting"
+                    self._status["next_run_at"] = next_run_at
+
+                if self._wait_for_next_run(next_run_at):
                     break
 
         finally:
             with self._lock:
-                self._status["running"] = False
+                self._status["phase"] = "stopped"
+                self._status["next_run_at"] = None
 
     def status(self):
         with self._lock:
             snapshot = self._status.copy()
+            snapshot["last_successful_end"] = self._last_successful_end
 
             if snapshot["counts"] is not None:
                 snapshot["counts"] = snapshot["counts"].copy()
@@ -138,8 +151,7 @@ class PollingWorker:
             return age >= self.heartbeat_timeout_seconds
 
 
-    def _wait_for_next_run(self, wait_seconds):
-        deadline = monotonic() + wait_seconds
+    def _wait_for_next_run(self, deadline):
 
         while not self._stop_event.is_set():
             if self._heartbeat_expired():
@@ -154,3 +166,5 @@ class PollingWorker:
                 return True
 
         return True
+
+polling_worker = PollingWorker()

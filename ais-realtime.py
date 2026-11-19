@@ -1,3 +1,6 @@
+from time import monotonic
+from math import ceil
+
 import streamlit as st
 import folium
 from folium.plugins import MeasureControl
@@ -8,6 +11,7 @@ from dotenv import dotenv_values
 from pathlib import Path
 from html import escape
 from datetime import timezone
+from poller import polling_worker
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 
@@ -108,6 +112,41 @@ def asset_icon(asset_name, color):
         class_name="asset-marker",
     )
 
+@st.fragment(run_every=1)
+def polling_controls():
+    
+    polling_minutes = st.number_input(
+            "Polling interval (minutes)",
+            min_value=1,
+            value=5,
+            step=1,
+            key="polling_minutes",
+    )
+
+    if st.button("Start polling", key="start_polling"):
+        polling_worker.start(polling_minutes)
+
+    if st.button("Stop polling", key="stop_polling"):
+        polling_worker.stop()
+
+    polling_worker.heartbeat()
+
+    status = polling_worker.status()
+    st.caption(f"Polling: {status['phase']}")
+
+    countdown_s = status["next_run_at"]
+    if countdown_s is None:
+        st.caption("Update in: N/A")
+    else:
+        countdown_s = max(0, ceil(countdown_s - monotonic()))
+        minutes, seconds = divmod(countdown_s, 60)
+        st.caption(f"Update in: {minutes:02d}:{seconds:02d}")
+
+    if status["error"] is not None:
+        st.caption("Last polling batch failed.")
+
+
+
 
 
 def winlayout():
@@ -118,13 +157,7 @@ def winlayout():
 
         st.subheader("Adapter")
 
-        polling_minutes = st.number_input(
-            "Polling interval (minutes)",
-            min_value=1,
-            value=5,
-            step=1,
-            key="polling_minutes",
-        )
+        polling_controls()
 
         st.subheader("Display")
 
@@ -136,18 +169,12 @@ def winlayout():
             key="target_minutes",
         )
 
-        refresh_clicked = st.button("Refresh map", key="refresh_map")
 
     with st.bottom:
         st.caption(
             "© 2026 INESC TEC - MIT License | fabio.d.pacheco@inesctec.pt | tiago.a.teixeira@inesctec.pt"
         )
 
-    return{
-        "polling_minutes": polling_minutes,
-        "target_minutes": target_minutes,
-        "refresh_clicked": refresh_clicked,
-    }
  
 def mapit(assets, asset_colors):
     m = folium.Map(
@@ -227,13 +254,13 @@ def mapit(assets, asset_colors):
 
     return m
 
-    
 
-def loop():
-    settings = winlayout()
-    st.logo("https://repositorio.inesctec.pt/assets/images/dspace-logo.svg")
+@st.fragment
+def map_panel():
+    with st.sidebar:
+        refresh_clicked = st.button("Refresh map", key="refresh_map")
 
-    if "assets" not in st.session_state or settings["refresh_clicked"]:
+    if "assets" not in st.session_state or refresh_clicked:
         try:
             assets = fetchDB()
         except (psycopg2.Error, ValueError, OSError):
@@ -268,5 +295,12 @@ def loop():
     m = mapit(assets, asset_colors)
 
     st.iframe(m.get_root().render(), height=800)
+
+
+def loop():
+    winlayout()
+    st.logo("https://repositorio.inesctec.pt/assets/images/dspace-logo.svg")
+    map_panel()
+
 
 loop()
