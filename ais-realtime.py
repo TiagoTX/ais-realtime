@@ -4,6 +4,8 @@ from math import ceil
 import streamlit as st
 import folium
 from folium.plugins import MeasureControl
+from folium.utilities import parse_options
+from branca.element import Element
 import psycopg2
 from psycopg2 import sql
 from psycopg2.extras import RealDictCursor
@@ -179,7 +181,7 @@ def winlayout():
         )
 
  
-def mapit(assets, asset_colors):
+def mapit():
     m = folium.Map(
         location=[41.458747, -8.842215],
         zoom_start=6,
@@ -230,29 +232,6 @@ def mapit(assets, asset_colors):
         completed_color="#377eb8",
     ))
 
-    for asset in assets:
-        name = asset["asset_name"]
-        lat = float(asset["lat"])
-        lon = float(asset["lon"])
-        color = asset_colors[name]
-
-        source_time = asset["received_at"].astimezone(
-            timezone.utc
-        ).isoformat()
-
-        popup = (
-            f"<b>Asset:</b> {escape(str(name))}<br>"
-            f"<b>Latitude:</b> {lat:.6f}<br>"
-            f"<b>Longitude:</b> {lon:.6f}<br>"
-            f"<b>Source time (UTC):</b> {source_time}"
-        )
-
-        folium.Marker(
-            location=[lat, lon],
-            icon=asset_icon(name, color),
-            popup=folium.Popup(popup, max_width=320),
-        ).add_to(m)
-
     folium.LayerControl(position="topright").add_to(m)
 
     return m
@@ -260,14 +239,23 @@ def mapit(assets, asset_colors):
 asset_map_component = st.components.v2.component(
     "asset_map",
     html='<iframe id="live-map" title="Live asset map" sandbox="allow-scripts"></iframe>',
-    css="#live-map { width: 100%; height: 400px; border: 0; }",
+    css="#live-map { width: 100%; height: 800px; border: 0; }",
     js="""
         export default function ({ parentElement, data }) {
             const frame = parentElement.querySelector("#live-map");
 
             if (!frame.hasAttribute("srcdoc")) {
+                const channel = new MessageChannel();
+                frame.reportPort = channel.port1;
+
+                frame.addEventListener("load", () => {
+                    frame.contentWindow.postMessage("connect-reports", "*", [channel.port2]);
+                }, { once: true });
+
                 frame.srcdoc = data.base_html;
             }
+
+            frame.reportPort.postMessage(data.reports);
         }
     """,
 )
@@ -306,33 +294,114 @@ def map_panel():
     with st.sidebar:
         st.caption(f"{len(assets)} assets loaded")
 
-    if assets_loaded or "map_html" not in st.session_state:
-        
-        if "asset_colors" not in st.session_state:
-            st.session_state.asset_colors = {}
+    if "asset_map_base_html" not in st.session_state:
+        base_map = mapit()
+        map_page = base_map.get_root()
 
-        asset_colors = st.session_state.asset_colors
+        map_page.script.add_child(
+            Element(f'const liveMapName = "{base_map.get_name()}";')
+        )
 
+        map_page.html.add_child(Element("""
+            <script>
+                const markersByMmsi = new Map();
+
+                function makeAssetPopup(report) {
+                    const popup = document.createElement("div");
+                    const fields = [
+                        ["Asset", report.mmsi],
+                        ["Latitude", report.lat.toFixed(6)],
+                        ["Longitude", report.lon.toFixed(6)],
+                        ["Source time (UTC)", report.received_at],
+                    ];
+
+                    for (const [label, value] of fields) {
+                        const line = document.createElement("div");
+                        const title = document.createElement("strong");
+                        title.textContent = label + ": ";
+                        line.append(title, value);
+                        popup.append(line);
+                    }
+
+                    return popup;
+                }
+
+                window.addEventListener("message", (event) => {
+                    if (event.source !== window.parent || event.data !== "connect-reports") {
+                        return;
+                    }
+
+                    const port = event.ports[0];
+                    if (!port) {
+                        return;
+                    }
+
+                    port.onmessage = ({ data: reports }) => {
+                        if (!Array.isArray(reports)) {
+                            return;
+                        }
+
+                        const map = window[liveMapName];
+
+                        for (const report of reports) {
+                            const current = markersByMmsi.get(report.mmsi);
+                            if (current) {
+                                const previous = current.report;
+                                const moved = report.lat !== previous.lat
+                                    || report.lon !== previous.lon;
+
+                                if (moved) {
+                                    current.marker.setLatLng([report.lat, report.lon]);
+                                }
+
+                                if (moved || report.received_at !== previous.received_at) {
+                                    current.marker.setPopupContent(makeAssetPopup(report));
+                                    current.report = report;
+                                }
+                                continue;
+                            }
+
+                            const marker = L.marker([report.lat, report.lon], {
+                                icon: L.divIcon(report.icon),
+                            }).addTo(map);
+
+                            marker.bindPopup(makeAssetPopup(report), { maxWidth: 320 });
+
+                            markersByMmsi.set(report.mmsi, { marker, report });
+                        }
+                    };
+                });
+            </script>
+        """))
+
+        st.session_state.asset_map_base_html = map_page.render()
+
+    if assets_loaded or "live_map_reports" not in st.session_state:
+        asset_colors = st.session_state.setdefault("asset_colors", {})
+        reports = []
         for asset in assets:
             name = asset["asset_name"]
-
+            received_at = asset["received_at"].astimezone(timezone.utc).isoformat()
             if name not in asset_colors:
                 asset_colors[name] = colorscheme[
                     len(asset_colors) % len(colorscheme)
                 ]
-                
-        m = mapit(assets, asset_colors)
-        st.session_state.map_html = m.get_root().render()
 
-    st.iframe(st.session_state.map_html, height=800)
-
-    if "live_map_base_html" not in st.session_state:
-        base_map = mapit([], {})
-        st.session_state.live_map_base_html = base_map.get_root().render()
+            reports.append({
+                "mmsi": str(name),
+                "lat": float(asset["lat"]),
+                "lon": float(asset["lon"]),
+                "received_at": received_at,
+                "icon": parse_options(**asset_icon(name, asset_colors[name]).options),
+            })
+        st.session_state.live_map_reports = reports
 
     asset_map_component(
-        key="asset_map",
-        data={"base_html": st.session_state.live_map_base_html},
+        key = "live_asset_map",
+        data = {
+            "base_html": st.session_state.asset_map_base_html,
+            "reports": st.session_state.live_map_reports,
+        }
     )
 
 def loop():
