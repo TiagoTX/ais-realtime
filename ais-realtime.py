@@ -1,5 +1,5 @@
 from time import monotonic
-from math import ceil
+from math import ceil, asin, cos, radians, sin, sqrt
 
 import streamlit as st
 import folium
@@ -77,6 +77,21 @@ def fetchDB():
         conn.close()
 
     return rows
+
+
+
+def distance_nm(lat1, lon1, lat2, lon2):
+    lat1, lon1, lat2, lon2 = map(radians, (lat1, lon1, lat2, lon2))
+    delta_lat = lat2 - lat1
+    delta_lon = lon2 - lon1
+    haversine = (
+        sin(delta_lat / 2) ** 2
+        + cos(lat1) * cos(lat2) * sin(delta_lon / 2) ** 2
+    )
+    earth_radius_nm = 6_371_000 / 1_852
+    return 2 * earth_radius_nm * asin(sqrt(min(1.0, haversine)))
+
+
 
 def asset_icon(asset_name, color):
     label = escape(str(asset_name))
@@ -263,7 +278,7 @@ asset_map_component = st.components.v2.component(
 @st.fragment(run_every=1)
 def map_panel():
     with st.sidebar:
-        refresh_clicked = st.button("Refresh map", key="refresh_map")
+        refresh_clicked = st.button("Refresh assets", key="refresh_map")
 
     latest_batch_stamp = polling_worker.status()["last_successful_end"]
     assets_loaded = False
@@ -293,6 +308,44 @@ def map_panel():
 
     with st.sidebar:
         st.caption(f"{len(assets)} assets loaded")
+
+        centre_mode = st.selectbox(
+            "Radius filter",
+            ["Off", "Centre on asset", "Manual coordinates"],
+            key="radius_centre_mode",
+        )
+        centre = None
+
+        if centre_mode == "Centre on asset":
+            assets_by_mmsi = {asset["asset_name"]: asset for asset in assets}
+            centre_mmsi = st.selectbox(
+                "Pick asset (MMSI)",
+                options=list(assets_by_mmsi),
+                index=None,
+                key="radius_centre_mmsi",
+            )
+            centre_asset = assets_by_mmsi.get(centre_mmsi)
+            if centre_asset is not None:
+                centre = (float(centre_asset["lat"]), float(centre_asset["lon"]))
+                st.caption(f"Centre: {centre[0]:.6f}, {centre[1]:.6f}")
+
+        elif centre_mode == "Manual coordinates":
+            latitude = st.number_input(
+                "Centre latitude", -90.0, 90.0, value=None, format="%.6f"
+            )
+            longitude = st.number_input(
+                "Centre longitude", -180.0, 180.0, value=None, format="%.6f"
+            )
+            if latitude is not None and longitude is not None:
+                centre = (latitude, longitude)
+
+        radius_nm = st.number_input(
+            "Radius (nautical miles)",
+            min_value=0.1,
+            value=10.0,
+            step=0.1,
+            key="radius_nm",
+        )
 
     if "asset_map_base_html" not in st.session_state:
         base_map = mapit()
@@ -342,6 +395,15 @@ def map_panel():
                         }
 
                         const map = window[liveMapName];
+
+                        const visibleMmsis = new Set(reports.map(report => report.mmsi));
+
+                        for (const [mmsi, current] of markersByMmsi) {
+                            if (!visibleMmsis.has(mmsi)) {
+                                map.removeLayer(current.marker);
+                                markersByMmsi.delete(mmsi);
+                            }
+                        }
 
                         for (const report of reports) {
                             const current = markersByMmsi.get(report.mmsi);
@@ -396,11 +458,21 @@ def map_panel():
             })
         st.session_state.live_map_reports = reports
 
+    visible_reports = st.session_state.live_map_reports
+    if centre is not None:
+        centre_lat, centre_lon = centre
+        visible_reports = [
+            report
+            for report in visible_reports
+            if distance_nm(centre_lat, centre_lon, report["lat"], report["lon"])
+            <= radius_nm
+        ]
+
     asset_map_component(
         key = "live_asset_map",
         data = {
             "base_html": st.session_state.asset_map_base_html,
-            "reports": st.session_state.live_map_reports,
+            "reports": visible_reports,
         }
     )
 
