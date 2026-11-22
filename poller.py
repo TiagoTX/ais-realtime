@@ -132,6 +132,10 @@ class PollingWorker:
     def status(self):
         with self._lock:
             snapshot = self._status.copy()
+
+            if snapshot["phase"] == "fetching" and self._stop_event.is_set():
+                snapshot["phase"] = "stopping"
+
             snapshot["last_successful_end"] = self._last_successful_end
 
             if snapshot["counts"] is not None:

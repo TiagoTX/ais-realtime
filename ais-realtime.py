@@ -132,7 +132,10 @@ def polling_controls():
     polling_worker.heartbeat()
 
     status = polling_worker.status()
-    st.caption(f"Polling: {status['phase']}")
+    if status["phase"] == "stopping":
+        st.caption("Stopping after current batch")
+    else:
+        st.caption(f"Polling status: {status['phase']}")
 
     countdown_s = status["next_run_at"]
     if countdown_s is None:
@@ -254,13 +257,36 @@ def mapit(assets, asset_colors):
 
     return m
 
+asset_map_component = st.components.v2.component(
+    "asset_map",
+    html='<iframe id="live-map" title="Live asset map" sandbox="allow-scripts"></iframe>',
+    css="#live-map { width: 100%; height: 400px; border: 0; }",
+    js="""
+        export default function ({ parentElement, data }) {
+            const frame = parentElement.querySelector("#live-map");
 
-@st.fragment
+            if (!frame.hasAttribute("srcdoc")) {
+                frame.srcdoc = data.base_html;
+            }
+        }
+    """,
+)
+
+@st.fragment(run_every=1)
 def map_panel():
     with st.sidebar:
         refresh_clicked = st.button("Refresh map", key="refresh_map")
 
-    if "assets" not in st.session_state or refresh_clicked:
+    latest_batch_stamp = polling_worker.status()["last_successful_end"]
+    assets_loaded = False
+    
+    # Updates on new batch, refresh button or first load 
+    if (
+        "last_map_batch_stamp" not in st.session_state
+        or refresh_clicked
+        or latest_batch_stamp != st.session_state.last_map_batch_stamp
+    ):
+        st.session_state.last_map_batch_stamp = latest_batch_stamp
         try:
             assets = fetchDB()
         except (psycopg2.Error, ValueError, OSError):
@@ -270,6 +296,7 @@ def map_panel():
         else:
             st.session_state.assets = assets
             st.session_state.read_error = None
+            assets_loaded = True
 
     if st.session_state.get("read_error"):
         st.error(st.session_state.read_error)
@@ -279,23 +306,34 @@ def map_panel():
     with st.sidebar:
         st.caption(f"{len(assets)} assets loaded")
 
-    if "asset_colors" not in st.session_state:
-        st.session_state.asset_colors = {}
+    if assets_loaded or "map_html" not in st.session_state:
+        
+        if "asset_colors" not in st.session_state:
+            st.session_state.asset_colors = {}
 
-    asset_colors = st.session_state.asset_colors
+        asset_colors = st.session_state.asset_colors
 
-    for asset in assets:
-        name = asset["asset_name"]
+        for asset in assets:
+            name = asset["asset_name"]
 
-        if name not in asset_colors:
-            asset_colors[name] = colorscheme[
-                len(asset_colors) % len(colorscheme)
-            ]
+            if name not in asset_colors:
+                asset_colors[name] = colorscheme[
+                    len(asset_colors) % len(colorscheme)
+                ]
+                
+        m = mapit(assets, asset_colors)
+        st.session_state.map_html = m.get_root().render()
 
-    m = mapit(assets, asset_colors)
+    st.iframe(st.session_state.map_html, height=800)
 
-    st.iframe(m.get_root().render(), height=800)
+    if "live_map_base_html" not in st.session_state:
+        base_map = mapit([], {})
+        st.session_state.live_map_base_html = base_map.get_root().render()
 
+    asset_map_component(
+        key="asset_map",
+        data={"base_html": st.session_state.live_map_base_html},
+    )
 
 def loop():
     winlayout()
