@@ -347,6 +347,25 @@ def map_panel():
             key="radius_nm",
         )
 
+        asset_filter_enabled = st.toggle(
+            "Filter by asset",
+            key="asset_filter_enabled",
+        )
+        selected_mmsis = st.multiselect(
+            "Assets to show (MMSI)",
+            options=[str(asset["asset_name"]) for asset in assets],
+            disabled=not asset_filter_enabled,
+            key="selected_asset_mmsis",
+        )
+
+        if asset_filter_enabled:
+            for mmsi in selected_mmsis:
+                st.toggle(
+                    f"Show reported targets from {mmsi}",
+                    value=False,
+                    key=f"show_reported_targets_{mmsi}",
+                )
+
     if "asset_map_base_html" not in st.session_state:
         base_map = mapit()
         map_page = base_map.get_root()
@@ -459,6 +478,14 @@ def map_panel():
         st.session_state.live_map_reports = reports
 
     visible_reports = st.session_state.live_map_reports
+
+    if asset_filter_enabled:
+        selected_mmsi_set = set(selected_mmsis)
+        visible_reports = [
+            report for report in visible_reports
+            if report["mmsi"] in selected_mmsi_set
+        ]
+
     if centre is not None:
         centre_lat, centre_lon = centre
         visible_reports = [
