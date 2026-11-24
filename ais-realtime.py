@@ -12,7 +12,7 @@ from psycopg2.extras import RealDictCursor
 from dotenv import dotenv_values
 from pathlib import Path
 from html import escape
-from datetime import timezone
+from datetime import datetime, timedelta, timezone
 from poller import polling_worker
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -22,6 +22,28 @@ colorscheme = [
     "#d2691e", "#a65628", "#e41a1c", "#008b8b",
     "#556b2f", "#4169e1", "#8b008b", "#455a64",
 ]
+
+def read_sibdb_rows(config, query, params=None):
+    conn = psycopg2.connect(
+        host=config["SIBDB_HOST"],
+        port=config.get("SIBDB_PORT") or "5432",
+        database=config["SIBDB_NAME"],
+        user=config["SIBDB_READER_USER"],
+        password=config["SIBDB_READER_PASSWORD"],
+        connect_timeout=5,
+    )
+    
+    try:
+        conn.set_session(readonly=True, autocommit=False)
+    
+        with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            cursor.execute(query, params)
+            rows = cursor.fetchall()
+    finally:
+        conn.close()
+    
+    return rows
+
 
 def fetchDB():
     config = dotenv_values(
@@ -58,25 +80,26 @@ def fetchDB():
         sql.Identifier("public", config["SIBDB_ASSET_TABLE"])
     )
 
-    conn = psycopg2.connect(
-        host=config["SIBDB_HOST"],
-        port=config.get("SIBDB_PORT") or "5432",
-        database=config["SIBDB_NAME"],
-        user=config["SIBDB_READER_USER"],
-        password=config["SIBDB_READER_PASSWORD"],
-        connect_timeout=5,
-    )
+    return read_sibdb_rows(config, query)
 
-    try:
-        conn.set_session(readonly=True, autocommit=False)
 
-        with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-            cursor.execute(query)
-            rows = cursor.fetchall()
-    finally:
-        conn.close()
 
-    return rows
+def fetch_target_reports(config, start, end):
+    table_name = config.get("SIBDB_TARGET_TABLE")
+    if not table_name:
+        return []
+
+    query = sql.SQL("""
+        SELECT id, asset_name, target_name, lat, lon, received_at
+        FROM {}
+        WHERE received_at >= %s AND received_at < %s
+        AND asset_name IS NOT NULL AND asset_name <> ''
+        AND lat BETWEEN -90 AND 90
+        AND lon BETWEEN -180 AND 180
+        ORDER BY received_at, id
+    """).format(sql.Identifier("public", table_name))
+
+    return read_sibdb_rows(config, query, params=(start, end))
 
 
 
@@ -91,6 +114,24 @@ def distance_nm(lat1, lon1, lat2, lon2):
     earth_radius_nm = 6_371_000 / 1_852
     return 2 * earth_radius_nm * asin(sqrt(min(1.0, haversine)))
 
+
+def color_for_asset(asset_name, asset_colors):
+    if asset_name not in asset_colors:
+        asset_colors[asset_name] = colorscheme[len(asset_colors) % len(colorscheme)]
+    return asset_colors[asset_name]
+
+
+def target_icon(color):
+    return folium.DivIcon(
+        html=(
+            '<div style="width:12px; height:12px; box-sizing:border-box; '
+            f'background-color:{color}; border:1px solid white;"></div>'
+        ),
+        icon_size=(12, 12),
+        icon_anchor=(6, 6),
+        popup_anchor=(0, -6),
+        class_name="target-marker",
+    )
 
 
 def asset_icon(asset_name, color):
@@ -275,20 +316,116 @@ asset_map_component = st.components.v2.component(
     """,
 )
 
+
+def build_live_map_html():
+    base_map = mapit()
+    map_page = base_map.get_root()
+
+    map_page.script.add_child(
+        Element(f'const liveMapName = "{base_map.get_name()}";')
+    )
+
+    map_page.html.add_child(Element("""
+        <script>
+            const markersById = new Map();
+
+            function makeReportPopup(report) {
+                const popup = document.createElement("div");
+                const fields = [
+                    [report.popup_label, report.mmsi],
+                    ["Latitude", report.lat.toFixed(6)],
+                    ["Longitude", report.lon.toFixed(6)],
+                    ["Source time (UTC)", report.received_at],
+                ];
+
+                for (const [label, value] of fields) {
+                    const line = document.createElement("div");
+                    const title = document.createElement("strong");
+                    title.textContent = label + ": ";
+                    line.append(title, value);
+                    popup.append(line);
+                }
+
+                return popup;
+            }
+
+            window.addEventListener("message", (event) => {
+                if (event.source !== window.parent || event.data !== "connect-reports") {
+                    return;
+                }
+
+                const port = event.ports[0];
+                if (!port) {
+                    return;
+                }
+
+                port.onmessage = ({ data: reports }) => {
+                    if (!Array.isArray(reports)) {
+                        return;
+                    }
+
+                    const map = window[liveMapName];
+                    const visibleMarkerIds = new Set(reports.map(report => report.marker_id));
+
+                    for (const [markerId, current] of markersById) {
+                        if (!visibleMarkerIds.has(markerId)) {
+                            map.removeLayer(current.marker);
+                            markersById.delete(markerId);
+                        }
+                    }
+
+                    for (const report of reports) {
+                        const current = markersById.get(report.marker_id);
+                        if (current) {
+                            const previous = current.report;
+                            const moved = report.lat !== previous.lat
+                                || report.lon !== previous.lon;
+
+                            if (moved) {
+                                current.marker.setLatLng([report.lat, report.lon]);
+                            }
+
+                            if (moved || report.received_at !== previous.received_at) {
+                                current.marker.setPopupContent(makeReportPopup(report));
+                                current.report = report;
+                            }
+                            continue;
+                        }
+
+                        const marker = L.marker([report.lat, report.lon], {
+                            icon: L.divIcon(report.icon),
+                        }).addTo(map);
+
+                        marker.bindPopup(makeReportPopup(report), { maxWidth: 320 });
+
+                        markersById.set(report.marker_id, { marker, report });
+                    }
+                };
+            });
+        </script>
+    """))
+
+    return map_page.render()
+
+
 @st.fragment(run_every=1)
 def map_panel():
     with st.sidebar:
         refresh_clicked = st.button("Refresh assets", key="refresh_map")
 
     latest_batch_stamp = polling_worker.status()["last_successful_end"]
+    target_minutes = st.session_state["target_minutes"]
     assets_loaded = False
-    
+
     # Updates on new batch, refresh button or first load 
-    if (
+    refresh_map = (
         "last_map_batch_stamp" not in st.session_state
         or refresh_clicked
         or latest_batch_stamp != st.session_state.last_map_batch_stamp
-    ):
+    )
+    target_window_changed = target_minutes != st.session_state.get("last_target_minutes")
+
+    if refresh_map:
         st.session_state.last_map_batch_stamp = latest_batch_stamp
         try:
             assets = fetchDB()
@@ -301,8 +438,29 @@ def map_panel():
             st.session_state.read_error = None
             assets_loaded = True
 
+    # Refresh target reports
+    if refresh_map or target_window_changed:
+        st.session_state.last_target_minutes = target_minutes
+        end = datetime.now(timezone.utc)
+        start = end - timedelta(minutes=target_minutes)
+
+        try:
+            config = dotenv_values(PROJECT_ROOT / ".env.gui", interpolate=False)
+            target_reports = fetch_target_reports(config, start, end)
+        except (psycopg2.Error, KeyError, ValueError, OSError):
+            st.session_state.target_read_error = (
+                "Could not load target reports from local SIBDB."
+            )
+            
+        else:
+            st.session_state.target_reports = target_reports
+            st.session_state.target_read_error = None
+
     if st.session_state.get("read_error"):
         st.error(st.session_state.read_error)
+
+    if st.session_state.get("target_read_error"):
+        st.error(st.session_state.target_read_error)
 
     assets = st.session_state.get("assets", [])
 
@@ -367,117 +525,35 @@ def map_panel():
                 )
 
     if "asset_map_base_html" not in st.session_state:
-        base_map = mapit()
-        map_page = base_map.get_root()
+        st.session_state.asset_map_base_html = build_live_map_html()
 
-        map_page.script.add_child(
-            Element(f'const liveMapName = "{base_map.get_name()}";')
-        )
-
-        map_page.html.add_child(Element("""
-            <script>
-                const markersByMmsi = new Map();
-
-                function makeAssetPopup(report) {
-                    const popup = document.createElement("div");
-                    const fields = [
-                        ["Asset", report.mmsi],
-                        ["Latitude", report.lat.toFixed(6)],
-                        ["Longitude", report.lon.toFixed(6)],
-                        ["Source time (UTC)", report.received_at],
-                    ];
-
-                    for (const [label, value] of fields) {
-                        const line = document.createElement("div");
-                        const title = document.createElement("strong");
-                        title.textContent = label + ": ";
-                        line.append(title, value);
-                        popup.append(line);
-                    }
-
-                    return popup;
-                }
-
-                window.addEventListener("message", (event) => {
-                    if (event.source !== window.parent || event.data !== "connect-reports") {
-                        return;
-                    }
-
-                    const port = event.ports[0];
-                    if (!port) {
-                        return;
-                    }
-
-                    port.onmessage = ({ data: reports }) => {
-                        if (!Array.isArray(reports)) {
-                            return;
-                        }
-
-                        const map = window[liveMapName];
-
-                        const visibleMmsis = new Set(reports.map(report => report.mmsi));
-
-                        for (const [mmsi, current] of markersByMmsi) {
-                            if (!visibleMmsis.has(mmsi)) {
-                                map.removeLayer(current.marker);
-                                markersByMmsi.delete(mmsi);
-                            }
-                        }
-
-                        for (const report of reports) {
-                            const current = markersByMmsi.get(report.mmsi);
-                            if (current) {
-                                const previous = current.report;
-                                const moved = report.lat !== previous.lat
-                                    || report.lon !== previous.lon;
-
-                                if (moved) {
-                                    current.marker.setLatLng([report.lat, report.lon]);
-                                }
-
-                                if (moved || report.received_at !== previous.received_at) {
-                                    current.marker.setPopupContent(makeAssetPopup(report));
-                                    current.report = report;
-                                }
-                                continue;
-                            }
-
-                            const marker = L.marker([report.lat, report.lon], {
-                                icon: L.divIcon(report.icon),
-                            }).addTo(map);
-
-                            marker.bindPopup(makeAssetPopup(report), { maxWidth: 320 });
-
-                            markersByMmsi.set(report.mmsi, { marker, report });
-                        }
-                    };
-                });
-            </script>
-        """))
-
-        st.session_state.asset_map_base_html = map_page.render()
-
+    asset_colors = st.session_state.setdefault("asset_colors", {})
     if assets_loaded or "live_map_reports" not in st.session_state:
-        asset_colors = st.session_state.setdefault("asset_colors", {})
         reports = []
         for asset in assets:
-            name = asset["asset_name"]
+            name = str(asset["asset_name"])
+            color = color_for_asset(name, asset_colors)
             received_at = asset["received_at"].astimezone(timezone.utc).isoformat()
-            if name not in asset_colors:
-                asset_colors[name] = colorscheme[
-                    len(asset_colors) % len(colorscheme)
-                ]
 
             reports.append({
-                "mmsi": str(name),
+                "marker_id": f"asset:{name}",
+                "mmsi": name,
+                "popup_label": "Asset",
                 "lat": float(asset["lat"]),
                 "lon": float(asset["lon"]),
                 "received_at": received_at,
-                "icon": parse_options(**asset_icon(name, asset_colors[name]).options),
+                "icon": parse_options(**asset_icon(name, color).options),
             })
         st.session_state.live_map_reports = reports
 
     visible_reports = st.session_state.live_map_reports
+
+    now = datetime.now(timezone.utc)
+    target_cutoff = now - timedelta(minutes=target_minutes)
+    visible_targets = [
+        report for report in st.session_state.get("target_reports", [])
+        if target_cutoff <= report["received_at"] < now
+    ]
 
     if asset_filter_enabled:
         selected_mmsi_set = set(selected_mmsis)
@@ -486,20 +562,50 @@ def map_panel():
             if report["mmsi"] in selected_mmsi_set
         ]
 
+        enabled_reporters = {
+            mmsi for mmsi in selected_mmsis
+            if st.session_state.get(f"show_reported_targets_{mmsi}", False)
+        }
+        visible_targets = [
+            report for report in visible_targets
+            if str(report["asset_name"]) in enabled_reporters
+        ]
+
     if centre is not None:
         centre_lat, centre_lon = centre
         visible_reports = [
-            report
-            for report in visible_reports
+            report for report in visible_reports
             if distance_nm(centre_lat, centre_lon, report["lat"], report["lon"])
             <= radius_nm
         ]
+        visible_targets = [
+            report for report in visible_targets
+            if distance_nm(
+                centre_lat, centre_lon, float(report["lat"]), float(report["lon"])
+            ) <= radius_nm
+        ]
+
+    target_markers = []
+    for target in visible_targets:
+        reporter = str(target["asset_name"])
+        color = color_for_asset(reporter, asset_colors)
+        received_at = target["received_at"].astimezone(timezone.utc).isoformat()
+
+        target_markers.append({
+            "marker_id": f"target:{target['id']}",
+            "mmsi": reporter,
+            "popup_label": "Reporting asset",
+            "lat": float(target["lat"]),
+            "lon": float(target["lon"]),
+            "received_at": received_at,
+            "icon": parse_options(**target_icon(color).options),
+        })
 
     asset_map_component(
         key = "live_asset_map",
         data = {
             "base_html": st.session_state.asset_map_base_html,
-            "reports": visible_reports,
+            "reports": visible_reports + target_markers,
         }
     )
 

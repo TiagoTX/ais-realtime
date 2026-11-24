@@ -7,14 +7,11 @@ GUI reads for display.
 
 ## Current status
 
-The working GUI shows the latest stored position per asset, with MMSI labels,
-coloured arrows, source timestamps in click popups, and a manual **Refresh map**
-button. It includes satellite/street backgrounds, labels and measurement tools.
-
-GUI development and historical browsing are work in progress. Automatic polling,
-its countdown, target display and asset visibility controls are not yet connected
-to the GUI. The sidebar's polling interval and target-window fields are currently
-inputs only.
+The GUI shows the latest stored position per asset as a coloured arrow with an
+MMSI label. With a target table configured, it shows recent raw observations as
+squares coloured by reporting asset. The target window defaults to ten minutes.
+Both layers support source-time popups, radius filtering, and asset selection.
+Target association and historical browsing are planned.
 
 ## Install and configure
 
@@ -30,7 +27,8 @@ credentials out of Git.
 
 ### `.env.gui` — GUI database reader
 
-The GUI needs a local SIBDB account with SELECT access to the asset table.
+The GUI needs a local SIBDB account with SELECT access to the asset table and
+to the target table if configured.
 
 | Setting | Purpose |
 | --- | --- |
@@ -40,10 +38,11 @@ The GUI needs a local SIBDB account with SELECT access to the asset table.
 | `SIBDB_READER_USER` | Reader account |
 | `SIBDB_READER_PASSWORD` | Reader password |
 | `SIBDB_ASSET_TABLE` | Asset table name, without the `public.` prefix |
+| `SIBDB_TARGET_TABLE` | Optional target table name, such as `TargetDB`, without the `public.` prefix. Leave unset for an asset-only map. |
 
-The reader uses a read-only transaction. The existing table must have `id`,
-`asset_name`, `lat`, `lon` and `received_at` columns. To show previously stored
-data, only this GUI configuration is needed.
+The reader uses a read-only transaction. Both tables need `id`, `asset_name`,
+`lat`, `lon` and `received_at` columns. The target table also needs
+`target_name`. This GUI configuration is sufficient to display stored reports.
 
 ### `.env.adapter` — AIS retrieval and local insertion
 
@@ -72,13 +71,14 @@ The AIS source connection currently uses port 5432.
 python -m streamlit run ais-realtime.py
 ```
 
-Open the local URL printed by Streamlit. The GUI loads the configured asset
-table on first opening; **Refresh map** reads it again. Click a marker for its
-coordinates and source timestamp in UTC. Stop the server with **Ctrl+C** in
-the terminal.
+Open the local URL printed by Streamlit. The GUI reads the configured tables on
+startup, after a successful polling batch, and when you click **Refresh assets**.
+Changing the target window reloads the target view. When the asset filter is on,
+enable **Show reported targets** for each reporter you want to see. Click a
+marker for its coordinates and source timestamp in UTC.
 
-Launching the GUI does not start AIS-source polling. It displays reports already
-stored in the configured local table.
+Use **Start polling** to begin fetching from the AIS source and **Stop** to end
+polling. Stop the Streamlit server with **Ctrl+C** in the terminal.
 
 ## Fetch new reports
 
