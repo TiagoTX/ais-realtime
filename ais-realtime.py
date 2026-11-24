@@ -408,16 +408,10 @@ def build_live_map_html():
     return map_page.render()
 
 
-@st.fragment(run_every=1)
-def map_panel():
-    with st.sidebar:
-        refresh_clicked = st.button("Refresh assets", key="refresh_map")
-
+def refresh_map_data(refresh_clicked, target_minutes):
     latest_batch_stamp = polling_worker.status()["last_successful_end"]
-    target_minutes = st.session_state["target_minutes"]
     assets_loaded = False
 
-    # Updates on new batch, refresh button or first load 
     refresh_map = (
         "last_map_batch_stamp" not in st.session_state
         or refresh_clicked
@@ -438,7 +432,6 @@ def map_panel():
             st.session_state.read_error = None
             assets_loaded = True
 
-    # Refresh target reports
     if refresh_map or target_window_changed:
         st.session_state.last_target_minutes = target_minutes
         end = datetime.now(timezone.utc)
@@ -456,14 +449,9 @@ def map_panel():
             st.session_state.target_reports = target_reports
             st.session_state.target_read_error = None
 
-    if st.session_state.get("read_error"):
-        st.error(st.session_state.read_error)
+    return assets_loaded
 
-    if st.session_state.get("target_read_error"):
-        st.error(st.session_state.target_read_error)
-
-    assets = st.session_state.get("assets", [])
-
+def map_filters(assets):
     with st.sidebar:
         st.caption(f"{len(assets)} assets loaded")
 
@@ -516,35 +504,75 @@ def map_panel():
             key="selected_asset_mmsis",
         )
 
+        enabled_reporters = set()
+
         if asset_filter_enabled:
             for mmsi in selected_mmsis:
-                st.toggle(
+                show_targets = st.toggle(
                     f"Show reported targets from {mmsi}",
                     value=False,
                     key=f"show_reported_targets_{mmsi}",
                 )
 
+                if show_targets:
+                    enabled_reporters.add(mmsi)
+
+
+    return centre, radius_nm, asset_filter_enabled, selected_mmsis, enabled_reporters
+
+def report_markers(reports, asset_colors, type):
+    markers = []
+    for marker in reports:
+        name = str(marker["asset_name"])
+        color = color_for_asset(name, asset_colors)
+        received_at = marker["received_at"].astimezone(timezone.utc).isoformat()
+
+        if type == "target":
+            popup_label = "Reported by"
+            marker_id = f"{type}:{marker['id']}"
+            icon = parse_options(**target_icon(color).options)
+        else:
+            popup_label = "Asset"
+            marker_id = f"asset:{name}"
+            icon = parse_options(**asset_icon(name, color).options)
+
+        markers.append({
+            "marker_id": marker_id,
+            "mmsi": name,
+            "popup_label": popup_label,
+            "lat": float(marker["lat"]),
+            "lon": float(marker["lon"]),
+            "received_at": received_at,
+            "icon": icon,
+        })
+    return markers
+
+
+@st.fragment(run_every=1)
+def map_panel():
+    with st.sidebar:
+        refresh_clicked = st.button("Refresh assets", key="refresh_map")
+
+    target_minutes = st.session_state["target_minutes"]
+    assets_loaded = refresh_map_data(refresh_clicked, target_minutes)
+
+    if st.session_state.get("read_error"):
+        st.error(st.session_state.read_error)
+
+    if st.session_state.get("target_read_error"):
+        st.error(st.session_state.target_read_error)
+
+    assets = st.session_state.get("assets", [])
+
+    centre, radius_nm, asset_filter_enabled, selected_mmsis, enabled_reporters = map_filters(assets)
+
     if "asset_map_base_html" not in st.session_state:
         st.session_state.asset_map_base_html = build_live_map_html()
 
     asset_colors = st.session_state.setdefault("asset_colors", {})
-    if assets_loaded or "live_map_reports" not in st.session_state:
-        reports = []
-        for asset in assets:
-            name = str(asset["asset_name"])
-            color = color_for_asset(name, asset_colors)
-            received_at = asset["received_at"].astimezone(timezone.utc).isoformat()
 
-            reports.append({
-                "marker_id": f"asset:{name}",
-                "mmsi": name,
-                "popup_label": "Asset",
-                "lat": float(asset["lat"]),
-                "lon": float(asset["lon"]),
-                "received_at": received_at,
-                "icon": parse_options(**asset_icon(name, color).options),
-            })
-        st.session_state.live_map_reports = reports
+    if assets_loaded or "live_map_reports" not in st.session_state:
+        st.session_state.live_map_reports = report_markers(assets, asset_colors, "asset")
 
     visible_reports = st.session_state.live_map_reports
 
@@ -555,6 +583,7 @@ def map_panel():
         if target_cutoff <= report["received_at"] < now
     ]
 
+
     if asset_filter_enabled:
         selected_mmsi_set = set(selected_mmsis)
         visible_reports = [
@@ -562,10 +591,6 @@ def map_panel():
             if report["mmsi"] in selected_mmsi_set
         ]
 
-        enabled_reporters = {
-            mmsi for mmsi in selected_mmsis
-            if st.session_state.get(f"show_reported_targets_{mmsi}", False)
-        }
         visible_targets = [
             report for report in visible_targets
             if str(report["asset_name"]) in enabled_reporters
@@ -585,27 +610,13 @@ def map_panel():
             ) <= radius_nm
         ]
 
-    target_markers = []
-    for target in visible_targets:
-        reporter = str(target["asset_name"])
-        color = color_for_asset(reporter, asset_colors)
-        received_at = target["received_at"].astimezone(timezone.utc).isoformat()
-
-        target_markers.append({
-            "marker_id": f"target:{target['id']}",
-            "mmsi": reporter,
-            "popup_label": "Reporting asset",
-            "lat": float(target["lat"]),
-            "lon": float(target["lon"]),
-            "received_at": received_at,
-            "icon": parse_options(**target_icon(color).options),
-        })
+    targets_loaded = report_markers(visible_targets, asset_colors, "target")
 
     asset_map_component(
         key = "live_asset_map",
         data = {
             "base_html": st.session_state.asset_map_base_html,
-            "reports": visible_reports + target_markers,
+            "reports": visible_reports + targets_loaded,
         }
     )
 
